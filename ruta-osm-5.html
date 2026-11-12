@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"><title>Optimizador de rutas · OpenStreetMap</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{--bg:#f6f7f9;--sf:#fff;--tx:#1b1f24;--mu:#667;--bd:#d9dde3;--ac:#2563eb}
+*{box-sizing:border-box}html,body{height:100%;margin:0}body{font:14px/1.4 system-ui,sans-serif;color:var(--tx);background:var(--bg);display:grid;grid-template-columns:380px 1fr}
+@media(max-width:800px){body{grid-template-columns:1fr;grid-template-rows:auto 60vh;height:auto}}
+#p{overflow:auto;padding:12px;background:var(--sf);border-right:1px solid var(--bd);max-height:100vh}
+#map{min-height:300px;height:100%}
+h1{font-size:18px;margin:0 0 8px}h2{font-size:14px;margin:14px 0 6px}
+textarea,select,input{width:100%;border:1px solid var(--bd);border-radius:6px;padding:6px;font:inherit;background:var(--bg);color:var(--tx)}
+textarea{height:80px}button{background:var(--ac);color:#fff;border:0;border-radius:6px;padding:7px 11px;font:inherit;cursor:pointer}
+button.s{background:var(--bg);color:var(--tx);border:1px solid var(--bd)}
+.r{display:flex;gap:6px;margin-top:6px}.r>*{flex:1}.m{color:var(--mu);font-size:12px}
+.i{display:flex;align-items:center;gap:6px;padding:3px 6px;border:1px solid var(--bd);border-radius:6px;margin-bottom:3px;background:var(--bg);cursor:grab}
+.i.o{border-color:var(--ac)}.i b{width:26px;text-align:right;color:var(--mu)}.i span.a{color:#b45309}.i span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.i button{padding:1px 7px;background:transparent;color:var(--tx);border:1px solid var(--bd)}
+.st{display:flex;gap:14px}.st b{font-size:20px;display:block}
+.pin.fs{background:#16a34a}.pin.fe{background:#dc2626}.i.fs{border-left:4px solid #16a34a}.i.fe{border-left:4px solid #dc2626}.i{cursor:pointer}.i.sel{border-color:#ea580c;background:#fff7ed;box-shadow:0 0 0 2px rgba(234,88,12,.3)}.pin.sel{background:#ea580c;box-shadow:0 0 0 5px rgba(234,88,12,.35)}
+.pin{background:#2563eb;color:#fff;border:2px solid #fff;border-radius:50%;font:bold 11px/18px system-ui;text-align:center;width:22px!important;height:22px!important;line-height:18px}
+</style></head><body>
+<div id="p">
+<h1>🗺️ Optimizador de rutas</h1>
+<p class="m">Pega <b>una por línea</b> y mezcla lo que quieras: <b>direcciones</b>, <b>enlaces de Google Maps</b> (cortos o largos) o <b>coordenadas</b>. También puedes hacer clic en el mapa.</p>
+<div class="r"><input id="q" placeholder="Buscar dirección o lugar…" onkeydown="if(event.key==='Enter')search()"><button style="flex:0" onclick="search()">Añadir</button></div>
+<textarea id="t" style="margin-top:6px;height:130px" placeholder="C. Jordi Tarrés, 1, 04740 Roquetas de Mar, Almería&#10;https://maps.app.goo.gl/3NTELZqTHv2v4BKA6&#10;36.83516145913201, -2.4515544688978252&#10;Mi cliente, 36.8351, -2.4515"></textarea>
+<div class="r"><button onclick="addTxt()">Añadir pegados</button><button class="s" onclick="cancel=true">Parar</button></div>
+<div class="r"><button class="s" onclick="exp()">Exportar lista</button><button class="s" onclick="clr()">Vaciar</button></div>
+<p class="m" id="msg"></p>
+<h2>Salida y llegada</h2><div class="r"><select id="s" title="Punto de salida" onchange="setS(this.value)"></select><select id="e" title="Punto de llegada" onchange="setE(this.value)"></select></div>
+<p class="m">Elige aquí o con los botones <b>S</b> (salida) y <b>F</b> (llegada) de cada punto. 🟢 salida · 🔴 llegada.</p>
+<h2>Medio de transporte</h2><select id="mode" onchange="try{localStorage.setItem('mode',this.value)}catch(e){}upd(0)"><option value="car">🚗 Coche</option><option value="moto">🏍️ Moto</option><option value="foot">🚶 A pie</option></select>
+<p class="m" id="mm"></p>
+<div class="r"><button onclick="opt()">⚡ Calcular mejor ruta</button></div>
+<h2>Resultado</h2><div class="st"><div><b id="n">0</b>puntos</div><div><b id="k2">–</b>km</div><div><b id="h">–</b>tiempo</div></div>
+<h2>Orden (arrastra o ↑ ↓)</h2><div id="l"></div>
+</div>
+<div id="map"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const MODES={car:'routed-car',moto:'routed-car',foot:'routed-foot'};
+async function osrm(path){const m=$('mode').value,u=['https://routing.openstreetmap.de/'+MODES[m]];if(m!=='foot')u.push('https://router.project-osrm.org');
+let err;for(const b of u)for(let k=0;k<3;k++){try{const j=await(await fetch(b+path)).json();if(j.code==='Ok')return j;err=new Error(j.code+(j.message?': '+j.message:''));if(['NoRoute','NoSegment','TooBig','InvalidQuery','InvalidValue'].includes(j.code))break}catch(e){err=e}await sleep(600*(k+1))}throw err}
+let selId=null,P=[],id=0,D=0,mk=[],lines=[],tm;
+const esc=x=>String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+try{const z=JSON.parse(localStorage.getItem('pts'));if(z&&z.P){P=z.P;id=z.id}}catch(e){}
+const $=q=>document.getElementById(q),R=Math.PI/180;
+const map=L.map('map').setView([37.24,-1.86],9);
+const osm=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
+const osmFr=L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',{subdomains:'abc',maxZoom:19,attribution:'© OpenStreetMap contributors, HOT'});
+const topo=L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{subdomains:'abc',maxZoom:17,attribution:'© OpenStreetMap contributors, SRTM | © OpenTopoMap'});
+L.control.layers({'OpenStreetMap':osm,'OSM Humanitario':osmFr,'Topográfico':topo}).addTo(map);
+let tileErr=0;osm.on('tileerror',()=>{if(++tileErr===5){map.removeLayer(osm);osmFr.addTo(map)}});
+map.on('click',e=>{P.push({id:++id,name:'Punto '+id,lat:e.latlng.lat,lng:e.latlng.lng});sel();upd()});
+const hv=(a,b)=>{const x=(b.lat-a.lat)*R,y=(b.lng-a.lng)*R,q=Math.sin(x/2)**2+Math.cos(a.lat*R)*Math.cos(b.lat*R)*Math.sin(y/2)**2;return 12742*Math.asin(Math.sqrt(q))};
+const co=c=>c.map(p=>p.lng.toFixed(6)+','+p.lat.toFixed(6)).join(';');
+/*PURE*/
+const dec=x=>{try{return decodeURIComponent(x)}catch(e){return x}};
+const COORD=/^(.*?)[\s,;:]*(-?\d{1,3}\.\d+)\s*[,;\s]\s*(-?\d{1,3}\.\d+)\s*$/;
+function coordsIn(d){const m=d.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/)||d.match(/@(-?\d+\.\d+),\s*(-?\d+\.\d+)/)||d.match(/[?&](?:q|ll|query|destination|center|mlat)=(-?\d+\.\d+)(?:,|\s|\+|&mlon=)\s*(-?\d+\.\d+)/)||d.match(/#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)/)||d.match(/^geo:(-?\d+\.\d+),(-?\d+\.\d+)/);return m?{lat:+m[1],lng:+m[2]}:null}
+function htmlCoords(h){const m=h.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/)||h.match(/\[null,null,(-?\d+\.\d+),(-?\d+\.\d+)\]/)||h.match(/center=(-?\d+\.\d+)(?:%2C|,)(-?\d+\.\d+)/)||h.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);return m?{lat:+m[1],lng:+m[2]}:null}
+function nameIn(d){const p=d.match(/\/place\/([^\/@?]+)/);return p?p[1].replace(/\+/g,' '):''}
+const AB=[[/^C\.\s*/i,'Calle '],[/^Av(da)?\.?\s+/i,'Avenida '],[/^P\.º\s*/i,'Paseo '],[/^Pl\.\s*/i,'Plaza '],[/^(Carr|Ctra)\.?\s+/i,'Carretera ']];
+function variants(l){let a=l.replace(/\s+/g,' ').trim();AB.forEach(([re,x])=>a=a.replace(re,x));
+const np=t=>t.replace(/\b\d{5}\b,?\s*/,'').replace(/,\s*$/,''),m=a.match(/^(.*?),\s*(\d+\s?[A-Za-z]?)\s*,\s*(.*)$/),v=[];
+if(m){v.push([`${m[1]} ${m[2]}, ${m[3]}`,0],[`${m[1]} ${m[2]}, ${np(m[3])}`,0],[`${m[1]}, ${np(m[3])}`,1])}else v.push([a,0],[np(a),0]);return v}
+const short=l=>l.split(',').map(x=>x.trim()).filter(x=>!/^\d{5}/.test(x)).slice(0,2).join(', ');
+/*ENDPURE*/
+let busy=false,cancel=false,lastNom=0;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let cache={};try{cache=JSON.parse(localStorage.getItem('gc')||'{}')}catch(e){}
+async function nom(q){const w=lastNom+1100-Date.now();if(w>0)await sleep(w);lastNom=Date.now();
+const u='https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=es&q='+encodeURIComponent(q);
+for(let k=0;k<2;k++){try{const r=await fetch(u);if(r.ok){const j=await r.json();return j[0]?{lat:+j[0].lat,lng:+j[0].lon}:null}}catch(e){}await sleep(3000);lastNom=Date.now()}return null}
+async function geocode(l){if(cache[l])return cache[l];
+for(const [q,ap] of variants(l)){const r=await nom(q);if(r){r.approx=ap;cache[l]=r;try{localStorage.setItem('gc',JSON.stringify(cache))}catch(e){}return r}}return null}
+const SHORT=/\/\/([\w-]+\.)?(goo\.gl|g\.co|bit\.ly|tinyurl\.com)\b/i;
+async function resolve(u){let fu=u,html='';
+if(SHORT.test(u)){const T=[
+async()=>{const j=await(await fetch('https://api.allorigins.win/get?url='+encodeURIComponent(u))).json();return[(j.status&&j.status.url)||'',j.contents||'']},
+async()=>{const r=await fetch('https://corsproxy.io/?url='+encodeURIComponent(u));return[r.url,await r.text()]},
+async()=>{const r=await fetch('https://api.codetabs.com/v1/proxy/?quest='+encodeURIComponent(u));return[r.url,await r.text()]}];
+for(const t of T){try{const[f,h]=await t();if(f&&!SHORT.test(f))fu=f;html=h||'';if(coordsIn(dec(fu))||htmlCoords(html))break}catch(e){}}}
+const d=dec(fu),q=(d.match(/[?&](?:q|query|destination)=([^&]+)/)||[])[1];
+return{c:coordsIn(d)||htmlCoords(html),name:nameIn(d),q:q&&!/^-?\d/.test(q)?q.replace(/\+/g,' '):nameIn(d)}}
+async function one(l){
+if(/^(https?:|geo:)/i.test(l)){const d=dec(l),c=coordsIn(d);if(c)return{...c,name:nameIn(d)||'Punto'};
+const r=await resolve(l);if(r.c)return{...r.c,name:r.name||'Punto'};
+if(r.q){const g=await geocode(r.q);if(g)return{...g,name:r.name||short(r.q)}}return null}
+const m=l.match(COORD);if(m)return{name:m[1].trim()||'Punto',lat:+m[2],lng:+m[3]};
+const g=await geocode(l);return g?{...g,name:short(l)}:null}
+async function proc(lines){if(busy){$('msg').textContent='Ya hay un proceso en marcha…';return}
+lines=lines.map(x=>x.trim()).filter(Boolean);if(!lines.length)return;busy=true;cancel=false;let ok=0,ap=0;const fail=[];
+for(let i=0;i<lines.length;i++){if(cancel){fail.push(...lines.slice(i));break}
+$('msg').textContent=`Procesando ${i+1}/${lines.length}… (las direcciones tardan ~1 s cada una)`;
+let r=null;try{r=await one(lines[i])}catch(e){}
+if(r){r.id=++id;P.push(r);ok++;if(r.approx)ap++;sel();upd(0,1)}else fail.push(lines[i])}
+busy=false;$('t').value=fail.join('\n');
+$('msg').textContent=ok+' añadidos'+(ap?` · ${ap} aproximados (~): no se halló el número, quedan en la calle`:'')+(fail.length?` · ${fail.length} sin resolver (se han dejado en el cuadro; si son enlaces cortos, ábrelos y pega la URL larga o las coordenadas)`:'');
+sel();upd(1)}
+function addTxt(){proc($('t').value.split('\n'))}
+function search(){const q=$('q').value;$('q').value='';proc([q]).then(()=>{if(P.length)map.setView([P[P.length-1].lat,P[P.length-1].lng],15)})}
+function exp(){$('t').value=P.map(p=>`${p.name.replace(/[,;\n]/g,' ')}, ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`).join('\n');$('t').select();$('msg').textContent='Lista exportada en el cuadro: guárdala; al pegarla de nuevo se añade al instante, sin buscar direcciones.'}
+function clr(){P=[];sel();upd()}
+function sel(){const s=$('s').value,e=$('e').value,o=P.map((p,i)=>`<option value="${p.id}">${i+1}. ${p.approx?'~ ':''}${esc(p.name)}</option>`).join('');
+$('s').innerHTML=o;$('e').innerHTML='<option value="">Llegada: sin final fijo</option>'+o;
+$('s').value=P.some(p=>p.id==s)?s:(P[0]?P[0].id:'');$('e').value=P.some(p=>p.id==e)?e:''}
+async function matrix(){const n=P.length,B=n<=100?n:50,M=Array.from({length:n},()=>Array(n)),bl=[];
+for(let a=0;a<n;a+=B)bl.push([a,Math.min(a+B,n)]);let k=0;
+for(const[a0,a1]of bl)for(const[b0,b1]of bl){$('msg').textContent='Calculando tiempos reales… '+(++k)+'/'+bl.length**2;
+const idx=[],pos={};for(let i=a0;i<a1;i++)if(!(i in pos)){pos[i]=idx.length;idx.push(i)}
+for(let i=b0;i<b1;i++)if(!(i in pos)){pos[i]=idx.length;idx.push(i)}
+const sr=[],ds=[];for(let i=a0;i<a1;i++)sr.push(pos[i]);for(let i=b0;i<b1;i++)ds.push(pos[i]);
+const j=await osrm('/table/v1/driving/'+co(idx.map(i=>P[i]))+'?annotations=duration&sources='+sr.join(';')+'&destinations='+ds.join(';'));
+j.durations.forEach((r,ri)=>r.forEach((v,ci)=>{M[a0+ri][b0+ci]=v}));if(bl.length>1)await sleep(250)}
+if(M.some(r=>r.some(v=>v==null)))throw new Error('hay puntos sin ruta');
+return M.map((r,i)=>r.map((v,j)=>(v+M[j][i])/2))}
+let opting=false;
+async function opt(){if(P.length<3||opting)return;opting=true;try{await opt2()}finally{opting=false}}
+async function opt2(){const n=P.length;
+let M=P.map(a=>P.map(b=>hv(a,b))),src='distancia en línea recta';
+if(n<=300){try{M=await matrix();src='tiempos reales ('+$('mode').selectedOptions[0].text.replace(/^\S+\s/,'').toLowerCase()+')'}catch(e){M=P.map(a=>P.map(b=>hv(a,b)));src='distancia en línea recta (el servidor rechazó la matriz: '+e.message+')'}}
+else src='distancia en línea recta (más de 300 puntos)';
+$('msg').textContent='Optimizado con '+src+'.';
+const si=P.findIndex(p=>p.id==$('s').value),ei=$('e').value?P.findIndex(p=>p.id==$('e').value):-1;
+if(si<0){$('msg').textContent='Elige un punto de salida.';return}
+if(si===ei){$('msg').textContent='La salida y la llegada deben ser distintas.';return}
+const left=new Set(P.map((_,i)=>i));left.delete(si);if(ei>=0)left.delete(ei);
+let path=[si],c=si;while(left.size){let b=-1,bd=1e18;left.forEach(j=>{if(M[c][j]<bd){bd=M[c][j];b=j}});path.push(b);left.delete(b);c=b}
+if(ei>=0)path.push(ei);const L2=path.length,last=ei>=0?L2-2:L2-1;let imp=true,it=0;
+while(imp&&it++<200){imp=false;for(let i=1;i<=last-1;i++)for(let j=i+1;j<=last;j++){const a=path[i-1],b=path[i],c2=path[j],d=j+1<L2?path[j+1]:-1;
+const dl=M[a][c2]+(d>=0?M[b][d]:0)-M[a][b]-(d>=0?M[c2][d]:0);if(dl<-1e-9){path.splice(i,j-i+1,...path.slice(i,j+1).reverse());imp=true}}}
+const old=P.slice();P=path.map(i=>old[i]);sel();upd()}
+function paint(){document.querySelectorAll('.i').forEach(d=>d.classList.toggle('sel',d.dataset.id==selId));mk.forEach(m=>{const on=m._pid==selId,e=m.getElement();if(e)e.classList.toggle('sel',on);m.setZIndexOffset(on?1000:0)})}
+function pick(i,pan){selId=i;paint();const p=P.find(x=>x.id==i);
+if(pan&&p)map.setView([p.lat,p.lng],Math.max(map.getZoom(),16));
+else{const d=document.querySelector('.i.sel');if(d)d.scrollIntoView({block:'center',behavior:'smooth'})}}
+function setS(v){const i=P.findIndex(p=>p.id==v);if(i<0)return;const[x]=P.splice(i,1);P.unshift(x);
+if($('e').value==x.id)$('e').value='';$('s').value=x.id;sel();upd()}
+function setE(v){if(v===''||v==null){$('e').value='';sel();upd();return}const i=P.findIndex(p=>p.id==v);if(i<0)return;
+if(v==$('s').value){$('msg').textContent='La llegada debe ser distinta de la salida.';sel();return}
+const[x]=P.splice(i,1);P.push(x);$('e').value=x.id;sel();upd()}
+function mv(i,j){if(j<0||j>=P.length)return;const [x]=P.splice(i,1);P.splice(j,0,x);sel();upd()}
+function del(i){P.splice(i,1);sel();upd()}
+function upd(fit,skip){$('mm').textContent=$('mode').value==='moto'?'La moto usa la red de carreteras de coche (no hay perfil propio): trayecto y tiempo equivalentes al coche.':'';try{localStorage.setItem('pts',JSON.stringify({P,id}))}catch(e){}$('n').textContent=P.length;$('l').innerHTML='';
+P.forEach((p,i)=>{const d=document.createElement('div');d.className='i'+(p.id==$('s').value?' fs':'')+(p.id==$('e').value?' fe':'');d.dataset.id=p.id;d.draggable=true;d.onclick=e=>{if(e.target.tagName!=='BUTTON')pick(p.id,true)};
+d.innerHTML=`<b>${i+1}</b><span class="${p.approx?'a':''}" title="${p.approx?'Aproximado (solo calle)':''}">${p.approx?'~ ':''}${esc(p.name)}</span><button title="Salida" onclick="setS(${p.id})">S</button><button title="Llegada" onclick="setE(${p.id})">F</button><button onclick="mv(${i},${i-1})">↑</button><button onclick="mv(${i},${i+1})">↓</button><button onclick="del(${i})">✕</button>`;
+d.ondragstart=()=>D=i;d.ondragover=e=>{e.preventDefault();d.classList.add('o')};d.ondragleave=()=>d.classList.remove('o');d.ondrop=e=>{e.preventDefault();mv(D,i)};$('l').appendChild(d)});
+mk.forEach(m=>m.remove());
+mk=P.map((p,i)=>{const m=L.marker([p.lat,p.lng],{title:p.name+(p.approx?' (aprox.)':''),icon:L.divIcon({className:'pin'+(p.id==$('s').value?' fs':'')+(p.id==$('e').value?' fe':''),html:i+1,iconSize:[22,22]})}).addTo(map);m._pid=p.id;m.on('click',()=>pick(p.id,false));return m});paint();
+if(fit&&P.length)map.fitBounds(L.latLngBounds(P.map(p=>[p.lat,p.lng])).pad(.1));
+clearTimeout(tm);if(!skip)tm=setTimeout(road,900)}
+let rid=0;
+async function road(){const my=++rid;lines.forEach(l=>l.remove());lines=[];
+if(P.length<2){$('k2').textContent=$('h').textContent='–';return}
+$('k2').textContent=$('h').textContent='…';
+let km=0,sec=0,i=0,bad=0,why='';const col=({car:'#2563eb',moto:'#9333ea',foot:'#16a34a'})[$('mode').value];
+while(i<P.length-1){const c=P.slice(i,i+25);let o=null;
+try{o=(await osrm('/route/v1/driving/'+co(c)+'?overview=full&geometries=geojson')).routes[0]}catch(e){why=e.message}
+if(my!==rid)return;
+if(o){km+=o.distance/1000;sec+=o.duration;lines.push(L.polyline(o.geometry.coordinates.map(x=>[x[1],x[0]]),{color:col,weight:4,opacity:.85}).addTo(map))}
+else{bad++;lines.push(L.polyline(c.map(p=>[p.lat,p.lng]),{color:'#dc2626',weight:3,dashArray:'6 8'}).addTo(map))}
+i+=24}
+if(my!==rid)return;
+$('k2').textContent=km.toFixed(1)+(bad?'+':'');$('h').textContent=Math.floor(sec/3600)+' h '+Math.round(sec%3600/60)+' min'+(bad?'+':'');
+if(bad)$('msg').textContent='Ruta: '+bad+' tramo(s) sin calcular ('+why+'), dibujados en rojo discontinuo; km y tiempo no los incluyen.'}
+try{$('mode').value=localStorage.getItem('mode')||'car'}catch(e){}
+sel();upd(1);
+</script></body></html>
